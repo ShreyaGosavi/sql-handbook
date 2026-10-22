@@ -6,6 +6,7 @@ segment each belongs in, save as .sql files in the sql-handbook repo, push.
 Usage (run from anywhere):
     python save_sql.py            # last 10 SQL solves
     python save_sql.py 20         # last 20 SQL solves
+    python save_sql.py readme     # rebuild segment + root READMEs and push
 
 Setup:
   1. Put this file in the root of your sql-handbook repo (or set SQL_REPO).
@@ -176,11 +177,12 @@ def git(*args):
     return subprocess.run(["git", "-C", str(REPO), *args], capture_output=True, text=True)
 
 
-def push(saved):
+def push(saved=None, msg=None):
     git("add", "-A")
-    msg = f"Add {len(saved)} SQL solution(s): " + ", ".join(t for t, _ in saved[:5])
-    if len(saved) > 5:
-        msg += "..."
+    if msg is None:
+        msg = f"Add {len(saved)} SQL solution(s): " + ", ".join(t for t, _ in saved[:5])
+        if len(saved) > 5:
+            msg += "..."
     c = git("commit", "-m", msg)
     if c.returncode != 0:
         print("Nothing to commit:", c.stdout.strip() or c.stderr.strip())
@@ -190,8 +192,88 @@ def push(saved):
     print("Pushed." if p.returncode == 0 else "Push failed - check the message above.")
 
 
+# ---------- READMEs ----------
+AUTO_START = "<!-- AUTO:START -->"
+AUTO_END = "<!-- AUTO:END -->"
+
+
+def parse_solution(path):
+    """Read title / dialect / date from the header comment written by this script."""
+    title, dialect, solved = path.stem.replace("-", " ").title(), "", ""
+    link = f"https://leetcode.com/problems/{path.stem}/"
+    try:
+        head = path.read_text(encoding="utf-8").splitlines()[:4]
+    except OSError:
+        head = []
+    if head and head[0].startswith("-- ") and not head[0].startswith("-- http"):
+        title = head[0][3:].strip()
+    for line in head:
+        m = re.search(r"https://leetcode\.com/problems/\S+", line)
+        if m:
+            link = m.group(0)
+        m = re.search(r"Dialect:\s*(\S+)", line)
+        if m:
+            dialect = m.group(1)
+        m = re.search(r"Solved:\s*(\d{4}-\d{2}-\d{2})", line)
+        if m:
+            solved = m.group(1)
+    return {"title": title, "dialect": dialect, "solved": solved, "link": link, "file": path.name}
+
+
+def segment_solutions(seg):
+    rows = [parse_solution(p) for p in (REPO / seg).glob("*.sql")]
+    return sorted(rows, key=lambda r: (r["solved"], r["title"]))
+
+
+def set_auto_block(path, block, default_head):
+    """Replace the AUTO block in a README, keeping everything the user wrote."""
+    wrapped = f"{AUTO_START}\n{block.strip()}\n{AUTO_END}"
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        if AUTO_START in text and AUTO_END in text:
+            pre = text.split(AUTO_START)[0]
+            post = text.split(AUTO_END, 1)[1]
+            new = pre + wrapped + post
+        else:
+            new = text.rstrip() + "\n\n" + wrapped + "\n"
+    else:
+        new = f"{default_head}\n\n{wrapped}\n"
+    if not path.exists() or path.read_text(encoding="utf-8") != new:
+        path.write_text(new, encoding="utf-8")
+        return True
+    return False
+
+
+def rebuild_readmes():
+    segs = [s for s in segments() if any((REPO / s).glob("*.sql"))]
+    total, summary = 0, []
+    for seg in segs:
+        rows = segment_solutions(seg)
+        total += len(rows)
+        summary.append((seg, len(rows)))
+        lines = [f"**Solved: {len(rows)}**", "",
+                 "| # | Problem | Dialect | Solved | Solution |",
+                 "|---|---------|---------|--------|----------|"]
+        for i, r in enumerate(rows, 1):
+            lines.append(f"| {i} | [{r['title']}]({r['link']}) | {r['dialect']} | "
+                         f"{r['solved']} | [{r['file']}]({r['file']}) |")
+        set_auto_block(REPO / seg / "README.md", "\n".join(lines),
+                       f"# {seg.replace('-', ' ').title()}")
+
+    lines = [f"**Total solved: {total}** across {len(summary)} segment(s)", "",
+             "| Segment | Solved |", "|---------|--------|"]
+    for seg, cnt in summary:
+        lines.append(f"| [{seg}]({seg}/) | {cnt} |")
+    set_auto_block(REPO / "README.md", "\n".join(lines), "# SQL Handbook")
+    print(f"READMEs rebuilt: {total} problems in {len(summary)} segment(s).")
+
+
 # ---------- main ----------
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "readme":
+        rebuild_readmes()
+        push(msg="Rebuild READMEs")
+        return
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     dump = REPO / "submissions.json"
     if dump.exists():
@@ -224,6 +306,7 @@ def main():
         dump.unlink()
         print("\nDeleted submissions.json (re-export next time).")
     if saved:
+        rebuild_readmes()
         push(saved)
     else:
         print("\nNothing new saved.")
